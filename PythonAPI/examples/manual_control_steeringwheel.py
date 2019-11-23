@@ -126,9 +126,10 @@ def get_actor_display_name(actor, truncate=250):
 
 
 class World(object):
-    def __init__(self, carla_world, hud, actor_filter):
+    def __init__(self, carla_world, hud, popup, args):
         self.world = carla_world
         self.hud = hud
+        self.popup = popup
         self.player = None
         self.collision_sensor = None
         self.lane_invasion_sensor = None
@@ -136,9 +137,12 @@ class World(object):
         self.camera_manager = None
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
-        self._actor_filter = actor_filter
+        self._actor_filter = args.filter
+        self._gamma = args.gamma
+        self.map = self.world.get_map()
         self.restart()
         self.world.on_tick(hud.on_world_tick)
+
 
     def restart(self):
         # Keep same camera config if the camera manager exists.
@@ -163,14 +167,21 @@ class World(object):
             spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
             self.player = self.world.try_spawn_actor(blueprint, spawn_point)
         # Set up the sensors.
-        self.collision_sensor = CollisionSensor(self.player, self.hud)
+        self.collision_sensor = CollisionSensor(self.player, self.hud, self.popup)
+        #self.collision_sensor = CollisionSensor(self.player, self.hud)
         self.lane_invasion_sensor = LaneInvasionSensor(self.player, self.hud)
         self.gnss_sensor = GnssSensor(self.player)
-        self.camera_manager = CameraManager(self.player, self.hud)
+        self.camera_manager = CameraManager(self.player, self.hud, self._gamma)
         self.camera_manager.transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
+
+
+
+#        carImg = pygame.image.load('/mnt/diplomarbeit/images/PinClipart.com_play-outside-clipart_749445.png')
+ #       self.popup.setImage(carImg)
+        self.popup.setImage(None)
 
     def next_weather(self, reverse=False):
         self._weather_index += -1 if reverse else 1
@@ -181,10 +192,12 @@ class World(object):
 
     def tick(self, clock):
         self.hud.tick(self, clock)
+        self.popup.tick(self, clock)
 
     def render(self, display):
         self.camera_manager.render(display)
         self.hud.render(display)
+        self.popup.render(display)
 
     def destroy(self):
         actors = [
@@ -397,6 +410,12 @@ class HUD(object):
         self._info_text = []
         self._server_clock = pygame.time.Clock()
 
+
+        # motor
+        self.motor = pygame.mixer.Sound('/mnt/diplomarbeit/sounds/DRIVEinSNOW.wav')
+        #pygame.mixer.music.play(-1)
+        # -music
+
     def on_world_tick(self, timestamp):
         self._server_clock.tick()
         self.server_fps = self._server_clock.get_fps()
@@ -404,6 +423,9 @@ class HUD(object):
         self.simulation_time = timestamp.elapsed_seconds
 
     def tick(self, world, clock):
+        
+        #self._server_clock.tick(30)
+
         self._notifications.tick(world, clock)
         if not self._show_info:
             return
@@ -419,12 +441,18 @@ class HUD(object):
         max_col = max(1.0, max(collision))
         collision = [x / max_col for x in collision]
         vehicles = world.world.get_actors().filter('vehicle.*')
+
+        #self.motor.play()
+
+        #####!! this causes performance issues of the client:
+        # world.world.get_map().name
+
         self._info_text = [
             'Server:  % 16.0f FPS' % self.server_fps,
             'Client:  % 16.0f FPS' % clock.get_fps(),
             '',
             'Vehicle: % 20s' % get_actor_display_name(world.player, truncate=20),
-            'Map:     % 20s' % world.world.map_name,
+            'Map:     % 20s' % world.map.name,
             'Simulation time: % 12s' % datetime.timedelta(seconds=int(self.simulation_time)),
             '',
             'Speed:   % 15.0f km/h' % (3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)),
@@ -461,6 +489,7 @@ class HUD(object):
                     break
                 vehicle_type = get_actor_display_name(vehicle, truncate=22)
                 self._info_text.append('% 4dm %s' % (d, vehicle_type))
+
 
     def toggle_info(self):
         self._show_info = not self._show_info
@@ -573,24 +602,48 @@ class HelpText(object):
 
 
 class CollisionSensor(object):
-    def __init__(self, parent_actor, hud):
+    #def __init__(self, parent_actor, hud):
+    def __init__(self, parent_actor, hud, popup):
         self.sensor = None
         self.history = []
         self._parent = parent_actor
         self.hud = hud
-        world = self._parent.get_world()
-        bp = world.get_blueprint_library().find('sensor.other.collision')
-        self.sensor = world.spawn_actor(bp, carla.Transform(), attach_to=self._parent)
+        self.popup = popup
+
+        self.world = self._parent.get_world()
+        bp = self.world.get_blueprint_library().find('sensor.other.collision')
+        self.sensor = self.world.spawn_actor(bp, carla.Transform(), attach_to=self._parent)
+
+        # scream
+#        self.motor = pygame.mixer.Sound('/mnt/diplomarbeit/sounds/Female Scream-SoundBible.com-237334261.wav')
+        self.crashSound = pygame.mixer.Sound('/mnt/diplomarbeit/sounds/Pain-SoundBible.com-1883168362.wav')
+        self.channelBusy = False
+
+        #load image
+        #self.carImg = pygame.image.load('/mnt/diplomarbeit/images/PinClipart.com_play-outside-clipart_749445.png').convert()
+        self.carImg = pygame.image.load('/mnt/diplomarbeit/images/PinClipart.com_play-outside-clipart_749445.png').convert_alpha()
+        #self.carImg = pygame.image.load('/mnt/diplomarbeit/images/PinClipart.com_play-outside-clipart_749445.png')
+
+
         # We need to pass the lambda a weak reference to self to avoid circular
         # reference.
         weak_self = weakref.ref(self)
         self.sensor.listen(lambda event: CollisionSensor._on_collision(weak_self, event))
+
+
+#        variables = self.world.__dict__.keys()
+
+#        logging.info('init %s',variables)
 
     def get_collision_history(self):
         history = collections.defaultdict(int)
         for frame, intensity in self.history:
             history[frame] += intensity
         return history
+
+
+    #def car(x,y):
+    #    gameDisplay.blit(carImg,(x,y))
 
     @staticmethod
     def _on_collision(weak_self, event):
@@ -605,6 +658,28 @@ class CollisionSensor(object):
         if len(self.history) > 4000:
             self.history.pop(0)
 
+
+        # scream if pedestrian:
+        #if 'walker' in event.other_actor.type_id: #check if other actor is a 'walker'
+        if isinstance(event.other_actor,carla.Walker):
+            if event.other_actor.is_alive: # does not mean that the pedestrian is "dead"
+
+                self.popup.setImage(self.carImg)
+
+                # play at the first time
+                if not self.channelBusy:
+                    channel = self.crashSound.play()
+                    self.channelBusy = True
+
+                    #while pygame.mixer.music.get_busy() == True:
+    
+                    while channel.get_busy():
+                        continue
+                    self.channelBusy = False
+                #logging.info('collided with "walker" :%s', event.other_actor.attributes)
+                #event.other_actor.destroy() # if destroyed, the actor is gone
+
+                
 
 # ==============================================================================
 # -- LaneInvasionSensor --------------------------------------------------------
@@ -667,7 +742,7 @@ class GnssSensor(object):
 
 
 class CameraManager(object):
-    def __init__(self, parent_actor, hud):
+    def __init__(self, parent_actor, hud, gamma_correction):
         self.sensor = None
         self.surface = None
         self._parent = parent_actor
@@ -678,6 +753,7 @@ class CameraManager(object):
             carla.Transform(carla.Location(x=1.6, z=1.7))]
         self.transform_index = 1
         self.sensors = [
+        #['sensor.camera.rgb', cc.Raw, 'Camera RGB']
             ['sensor.camera.rgb', cc.Raw, 'Camera RGB'],
             ['sensor.camera.depth', cc.Raw, 'Camera Depth (Raw)'],
             ['sensor.camera.depth', cc.Depth, 'Camera Depth (Gray Scale)'],
@@ -693,6 +769,8 @@ class CameraManager(object):
             if item[0].startswith('sensor.camera'):
                 bp.set_attribute('image_size_x', str(hud.dim[0]))
                 bp.set_attribute('image_size_y', str(hud.dim[1]))
+                if bp.has_attribute('gamma'):
+                    bp.set_attribute('gamma', str(gamma_correction))
             elif item[0].startswith('sensor.lidar'):
                 bp.set_attribute('range', '50')
             item.append(bp)
@@ -762,6 +840,56 @@ class CameraManager(object):
             image.save_to_disk('_out/%08d' % image.frame)
 
 
+
+
+
+# ==============================================================================
+# -- Helper for transparent images ---------------------------------------------------------------
+# ==============================================================================
+def blit_alpha(target, source, location, opacity):
+        x = location[0]
+        y = location[1]
+        temp = pygame.Surface((source.get_width(), source.get_height())).convert()
+        temp.blit(target, (-x, -y))
+        temp.blit(source, (0, 0))
+        temp.set_alpha(opacity)        
+        target.blit(temp, location)
+
+# ==============================================================================
+# -- Popup ---------------------------------------------------------------
+# ==============================================================================
+class Popup(object):
+    def __init__(self):
+        self.image = None
+        self.seconds_left = 0
+
+        self.tmp=None
+    
+    def setImage(self,img):
+
+        if img and self.seconds_left == 0:        
+
+            self.image = img.convert_alpha()
+            self.image = pygame.transform.scale(img, (300, 300))
+            self.seconds_left = 5
+        #else:
+        #    self.image = img #reset in tick()
+
+    def tick(self, _, clock):
+
+        if self.image:
+            logging.info('popup.tick %s',self.seconds_left)
+            delta_seconds = 1e-3 * clock.get_time()
+            self.seconds_left = max(0.0, self.seconds_left - delta_seconds)
+
+            if self.seconds_left == 0:
+                self.image = None #reset
+
+    def render(self,display):
+        if self.image:
+
+            blit_alpha(display, self.image, (500, 200), self.seconds_left*500)
+
 # ==============================================================================
 # -- game_loop() ---------------------------------------------------------------
 # ==============================================================================
@@ -773,6 +901,12 @@ def game_loop(args):
     world = None
 
     try:
+
+        # music
+        music = pygame.mixer.music.load('/home/michael/Desktop/Coldplay-Viva_La_Vida.mp3')
+        #pygame.mixer.music.play(-1)
+        # -music
+
         client = carla.Client(args.host, args.port)
         client.set_timeout(2.0)
 
@@ -781,7 +915,8 @@ def game_loop(args):
             pygame.HWSURFACE | pygame.DOUBLEBUF)
 
         hud = HUD(args.width, args.height)
-        world = World(client.get_world(), hud, args.filter)
+        popup = Popup()
+        world = World(client.get_world(), hud, popup, args)
         controller = DualControl(world, args.autopilot)
 
         clock = pygame.time.Clock()
@@ -839,6 +974,11 @@ def main():
         metavar='PATTERN',
         default='vehicle.*',
         help='actor filter (default: "vehicle.*")')
+    argparser.add_argument(
+        '--gamma',
+        default=2.0,
+        type=float,
+        help='Gamma correction of the camera (default: 2.0)')
     args = argparser.parse_args()
 
     args.width, args.height = [int(x) for x in args.res.split('x')]
